@@ -1,0 +1,19 @@
+# Pinned exactly: the local venv and the Docker image must resolve to the same
+# versions, otherwise "works on my machine" is the only thing we've proven.
+# All of these ship 3.14 wheels, so the image needs no build toolchain.
+
+# API
+fastapi==0.140.0
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
+
+# Persistence
+sqlalchemy==2.0.51
+psycopg[binary]==3.3.4
+
+# In-memory aggregation cache (must not survive a restart -> not Redis)
+cachetools==7.1.6
+
+# Tests. Kept in the same file so `docker compose run api pytest` just works.
+pytest==9.1.1
+httpx==0.28.1
