@@ -5,8 +5,8 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import ColumnElement, case, func, select
 from sqlalchemy.orm import Session
 
 from app import models
@@ -66,6 +66,27 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _filters(
+    account_id: str | None, date_from: date | None, date_to: date | None
+) -> list[ColumnElement[bool]]:
+    conditions: list[ColumnElement[bool]] = []
+    if account_id is not None:
+        conditions.append(models.Transaction.account_id == account_id)
+    if date_from is not None:
+        conditions.append(models.Transaction.operation_date >= date_from)
+    if date_to is not None:
+        conditions.append(models.Transaction.operation_date <= date_to)
+    return conditions
+
+
+def _reject_bad_request(
+    session: Session, account_id: str | None, date_from: date | None, date_to: date | None
+) -> None:
+    _validated_range(date_from, date_to)
+    if account_id is not None and not _known_account(session, account_id):
+        raise HTTPException(status_code=404, detail=f"unknown account_id {account_id!r}")
+
+
 @app.get("/transactions", response_model=list[TransactionOut])
 def list_transactions(
     session: SessionDep,
@@ -73,20 +94,109 @@ def list_transactions(
     date_from: Annotated[date | None, Query(alias="from")] = None,
     date_to: Annotated[date | None, Query(alias="to")] = None,
 ) -> list[models.Transaction]:
-    _validated_range(date_from, date_to)
+    _reject_bad_request(session, account_id, date_from, date_to)
 
-    if account_id is not None and not _known_account(session, account_id):
-        raise HTTPException(status_code=404, detail=f"unknown account_id {account_id!r}")
-
-    query = select(models.Transaction)
-    if account_id is not None:
-        query = query.where(models.Transaction.account_id == account_id)
-    if date_from is not None:
-        query = query.where(models.Transaction.operation_date >= date_from)
-    if date_to is not None:
-        query = query.where(models.Transaction.operation_date <= date_to)
-
-    query = query.order_by(
-        models.Transaction.operation_date, models.Transaction.transaction_id
+    # Ordering by the primary key as a tiebreaker keeps the response stable
+    # between calls when several rows share an operation_date.
+    query = (
+        select(models.Transaction)
+        .where(*_filters(account_id, date_from, date_to))
+        .order_by(models.Transaction.operation_date, models.Transaction.transaction_id)
     )
     return list(session.scalars(query))
+
+
+class CurrencyTotals(BaseModel):
+    currency: str
+    transactions: int
+    credits: Decimal
+    debits: Decimal
+    balance: Decimal
+    latest_reported_balance: Decimal | None
+    latest_operation_date: date | None
+
+
+class SummaryOut(BaseModel):
+    account_id: str | None
+    date_from: date | None = Field(default=None, serialization_alias="from")
+    date_to: date | None = Field(default=None, serialization_alias="to")
+    totals: list[CurrencyTotals]
+
+
+def _totals_by_currency(session: Session, conditions: list[ColumnElement[bool]]):
+    credited = func.sum(case((models.Transaction.amount > 0, models.Transaction.amount)))
+    debited = func.sum(case((models.Transaction.amount < 0, models.Transaction.amount)))
+
+    query = (
+        select(
+            models.Transaction.currency,
+            func.count().label("transactions"),
+            func.coalesce(credited, 0).label("credits"),
+            func.coalesce(debited, 0).label("debits"),
+            func.sum(models.Transaction.amount).label("balance"),
+        )
+        .where(*conditions)
+        .group_by(models.Transaction.currency)
+        .order_by(models.Transaction.currency)
+    )
+    return session.execute(query).all()
+
+
+def _latest_reported_balances(
+    session: Session, conditions: list[ColumnElement[bool]]
+) -> dict[str, tuple[Decimal | None, date | None]]:
+    ranked = (
+        select(
+            models.Transaction.currency,
+            models.Transaction.balance,
+            models.Transaction.operation_date,
+            func.row_number()
+            .over(
+                partition_by=models.Transaction.currency,
+                order_by=(
+                    models.Transaction.operation_date.desc(),
+                    models.Transaction.transaction_id.desc(),
+                ),
+            )
+            .label("rank"),
+        )
+        .where(*conditions)
+        .subquery()
+    )
+    rows = session.execute(
+        select(ranked.c.currency, ranked.c.balance, ranked.c.operation_date).where(
+            ranked.c.rank == 1
+        )
+    ).all()
+    return {row.currency: (row.balance, row.operation_date) for row in rows}
+
+
+@app.get("/transactions/summary", response_model=SummaryOut)
+def summarise_transactions(
+    session: SessionDep,
+    account_id: Annotated[str | None, Query()] = None,
+    date_from: Annotated[date | None, Query(alias="from")] = None,
+    date_to: Annotated[date | None, Query(alias="to")] = None,
+) -> SummaryOut:
+    _reject_bad_request(session, account_id, date_from, date_to)
+
+    conditions = _filters(account_id, date_from, date_to)
+    latest = _latest_reported_balances(session, conditions)
+
+    totals = []
+    for row in _totals_by_currency(session, conditions):
+        reported_balance, reported_on = latest.get(row.currency, (None, None))
+        totals.append(
+            CurrencyTotals(
+                currency=row.currency,
+                transactions=row.transactions,
+                credits=row.credits,
+                debits=row.debits,
+                balance=row.balance,
+                latest_reported_balance=reported_balance,
+                latest_operation_date=reported_on,
+            )
+        )
+    return SummaryOut(
+        account_id=account_id, date_from=date_from, date_to=date_to, totals=totals
+    )
