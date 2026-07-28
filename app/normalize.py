@@ -13,13 +13,10 @@ _CURRENCY_ALIASES = {
     "£": "GBP",
 }
 
-# Currency symbols and stray letters that turn up glued to an amount
-# (six rows look like "-€22.15"). Also strips the non-breaking space.
 _AMOUNT_NOISE = re.compile(r"[€£$\sA-Za-z]")
 
 _THOUSANDS_SEPARATORS = re.compile(r"[.,]")
 
-# Every separator must be followed by digits. Rejects "12..34" and a bare "-".
 _AMOUNT_SHAPE = re.compile(r"^[+-]?\d+(?:[.,]\d+)*$")
 
 _DATE_FORMATS = (
@@ -45,8 +42,6 @@ def normalize_currency(raw: str) -> str | None:
 
 
 def parse_amount(raw: str) -> Decimal | None:
-    # Blank is checked before the noise is stripped, so that a field holding
-    # only a symbol ("€") is malformed rather than reported as absent.
     stripped = raw.strip()
     if not stripped:
         return None
@@ -55,7 +50,6 @@ def parse_amount(raw: str) -> Decimal | None:
     if not _AMOUNT_SHAPE.match(text):
         raise ValueError(f"unparseable amount {raw!r}")
 
-    # The rightmost separator is the decimal point; earlier ones are grouping.
     last_separator = max(text.rfind("."), text.rfind(","))
     if last_separator >= 0:
         whole = _THOUSANDS_SEPARATORS.sub("", text[:last_separator])
@@ -77,12 +71,6 @@ def parse_date(raw: str) -> date | None:
 
 
 def date_from_transaction_id(transaction_id: str) -> date | None:
-    """Recover the operation date encoded in the id, or ``None`` if it isn't there.
-
-    Used only to fill the five rows with an empty ``operation_date``: the id
-    carries the same date, and it agrees with ``operation_date`` in all 532 rows
-    where both are present, which is what makes it trustworthy enough to use.
-    """
     match = _ID_DATE.match(transaction_id.strip())
     if match is None:
         return None
