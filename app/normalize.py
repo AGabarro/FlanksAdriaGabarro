@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 _CURRENCY_ALIASES = {
     "EUR": "EUR",
@@ -18,6 +18,9 @@ _CURRENCY_ALIASES = {
 _AMOUNT_NOISE = re.compile(r"[€£$\sA-Za-z]")
 
 _THOUSANDS_SEPARATORS = re.compile(r"[.,]")
+
+# Every separator must be followed by digits. Rejects "12..34" and a bare "-".
+_AMOUNT_SHAPE = re.compile(r"^[+-]?\d+(?:[.,]\d+)*$")
 
 _DATE_FORMATS = (
     "%Y-%m-%d",
@@ -42,19 +45,23 @@ def normalize_currency(raw: str) -> str | None:
 
 
 def parse_amount(raw: str) -> Decimal | None:
-    text = _AMOUNT_NOISE.sub("", raw.strip())
-    if not text:
+    # Blank is checked before the noise is stripped, so that a field holding
+    # only a symbol ("€") is malformed rather than reported as absent.
+    stripped = raw.strip()
+    if not stripped:
         return None
 
+    text = _AMOUNT_NOISE.sub("", stripped)
+    if not _AMOUNT_SHAPE.match(text):
+        raise ValueError(f"unparseable amount {raw!r}")
+
+    # The rightmost separator is the decimal point; earlier ones are grouping.
     last_separator = max(text.rfind("."), text.rfind(","))
     if last_separator >= 0:
         whole = _THOUSANDS_SEPARATORS.sub("", text[:last_separator])
         text = f"{whole}.{text[last_separator + 1:]}"
 
-    try:
-        return Decimal(text)
-    except InvalidOperation:
-        raise ValueError(f"unparseable amount {raw!r}") from None
+    return Decimal(text)
 
 
 def parse_date(raw: str) -> date | None:
