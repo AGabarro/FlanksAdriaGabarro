@@ -14,7 +14,8 @@ class Base(DeclarativeBase):
 class Account(Base):
     __tablename__ = "accounts"
 
-    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # 65 chars in the file ('A' + a 64-char hex digest), so 64 is one short.
+    account_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     iban: Mapped[str | None] = mapped_column(String(34))
     entity: Mapped[str | None] = mapped_column(String(64))
 
