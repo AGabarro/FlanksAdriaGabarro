@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, case, func, select
 from sqlalchemy.orm import Session
 
@@ -51,8 +51,9 @@ class TransactionOut(BaseModel):
     transaction_type: str | None
 
 
-def _known_account(session: Session, account_id: str) -> bool:
-    return session.get(models.Account, account_id) is not None
+def _require_known_account(session: Session, account_id: str | None) -> None:
+    if account_id is not None and session.get(models.Account, account_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown account_id {account_id!r}")
 
 
 def _validated_range(date_from: date | None, date_to: date | None) -> None:
@@ -75,14 +76,6 @@ def _filters(
     return conditions
 
 
-def _reject_bad_request(
-    session: Session, account_id: str | None, date_from: date | None, date_to: date | None
-) -> None:
-    _validated_range(date_from, date_to)
-    if account_id is not None and not _known_account(session, account_id):
-        raise HTTPException(status_code=404, detail=f"unknown account_id {account_id!r}")
-
-
 @app.get("/transactions", response_model=list[TransactionOut])
 def list_transactions(
     session: SessionDep,
@@ -90,10 +83,9 @@ def list_transactions(
     date_from: Annotated[date | None, Query(alias="from")] = None,
     date_to: Annotated[date | None, Query(alias="to")] = None,
 ) -> list[models.Transaction]:
-    _reject_bad_request(session, account_id, date_from, date_to)
+    _validated_range(date_from, date_to)
+    _require_known_account(session, account_id)
 
-    # Ordering by the primary key as a tiebreaker keeps the response stable
-    # between calls when several rows share an operation_date.
     query = (
         select(models.Transaction)
         .where(*_filters(account_id, date_from, date_to))
@@ -114,8 +106,6 @@ class CurrencyTotals(BaseModel):
 
 class SummaryOut(BaseModel):
     account_id: str | None
-    date_from: date | None = Field(default=None, serialization_alias="from")
-    date_to: date | None = Field(default=None, serialization_alias="to")
     totals: list[CurrencyTotals]
 
 
@@ -172,26 +162,18 @@ def summarise_transactions(
     session: SessionDep,
     response: Response,
     account_id: Annotated[str | None, Query()] = None,
-    date_from: Annotated[date | None, Query(alias="from")] = None,
-    date_to: Annotated[date | None, Query(alias="to")] = None,
 ) -> SummaryOut:
-    _reject_bad_request(session, account_id, date_from, date_to)
+    _require_known_account(session, account_id)
 
     summary, was_hit = summary_cache.get_or_compute(
-        (account_id, date_from, date_to),
-        lambda: _compute_summary(session, account_id, date_from, date_to),
+        account_id, lambda: _compute_summary(session, account_id)
     )
     response.headers["X-Cache"] = "HIT" if was_hit else "MISS"
     return summary
 
 
-def _compute_summary(
-    session: Session,
-    account_id: str | None,
-    date_from: date | None,
-    date_to: date | None,
-) -> SummaryOut:
-    conditions = _filters(account_id, date_from, date_to)
+def _compute_summary(session: Session, account_id: str | None) -> SummaryOut:
+    conditions = _filters(account_id, None, None)
     latest = _latest_reported_balances(session, conditions)
 
     totals = []
@@ -208,6 +190,4 @@ def _compute_summary(
                 latest_operation_date=reported_on,
             )
         )
-    return SummaryOut(
-        account_id=account_id, date_from=date_from, date_to=date_to, totals=totals
-    )
+    return SummaryOut(account_id=account_id, totals=totals)
