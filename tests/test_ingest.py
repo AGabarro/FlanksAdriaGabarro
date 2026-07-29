@@ -1,30 +1,15 @@
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 from sqlalchemy import String, select
 
 from app import models
-from app.db import create_all, reset_engine, session_scope
+from app.db import session_scope
 from app.ingest import ingest_file
 from app.parser import parse_csv
+from tests.conftest import SAMPLE
 
-SAMPLE = Path(__file__).parent / "data" / "test_data.csv"
 REAL_CSV = Path(__file__).parents[1] / "data" / "flanks_test_transactions.csv"
-
-
-@pytest.fixture
-def database(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
-    reset_engine()
-    create_all()
-    yield
-    reset_engine()
-
-
-@pytest.fixture
-def report(database):
-    return ingest_file(SAMPLE)
 
 
 def stored_transactions() -> list[models.Transaction]:
