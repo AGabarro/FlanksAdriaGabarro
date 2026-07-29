@@ -4,12 +4,13 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import ColumnElement, case, func, select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.cache import summary_cache
 from app.db import create_all, session_scope
 
 
@@ -59,11 +60,6 @@ def _validated_range(date_from: date | None, date_to: date | None) -> None:
         raise HTTPException(
             status_code=400, detail=f"'from' ({date_from}) is after 'to' ({date_to})"
         )
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
 
 
 def _filters(
@@ -174,12 +170,27 @@ def _latest_reported_balances(
 @app.get("/transactions/summary", response_model=SummaryOut)
 def summarise_transactions(
     session: SessionDep,
+    response: Response,
     account_id: Annotated[str | None, Query()] = None,
     date_from: Annotated[date | None, Query(alias="from")] = None,
     date_to: Annotated[date | None, Query(alias="to")] = None,
 ) -> SummaryOut:
     _reject_bad_request(session, account_id, date_from, date_to)
 
+    summary, was_hit = summary_cache.get_or_compute(
+        (account_id, date_from, date_to),
+        lambda: _compute_summary(session, account_id, date_from, date_to),
+    )
+    response.headers["X-Cache"] = "HIT" if was_hit else "MISS"
+    return summary
+
+
+def _compute_summary(
+    session: Session,
+    account_id: str | None,
+    date_from: date | None,
+    date_to: date | None,
+) -> SummaryOut:
     conditions = _filters(account_id, date_from, date_to)
     latest = _latest_reported_balances(session, conditions)
 

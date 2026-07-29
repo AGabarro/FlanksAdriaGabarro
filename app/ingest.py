@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.cache import summary_cache
 from app.db import create_all, session_scope
 from app.parser import ParseResult, RejectedRow, Transaction, parse_csv
 
@@ -131,6 +132,8 @@ def persist(parsed: ParseResult, total_rows: int) -> IngestReport:
                 )
             )
             inserted += 1
+
+    summary_cache.invalidate()
 
     return IngestReport(
         total_rows=total_rows,
